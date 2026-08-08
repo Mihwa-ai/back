@@ -1,7 +1,7 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const config = require("../config");
 const { getOrSet } = require("./cache");
-const { getKpiTrend, getRegionSales, getDeptSales, getBuyerSegments } = require("./dashboardQueries");
+const { getKpiTrend, getRegionSales, getDeptSales, getBuyerSegments, getSalesTypeTrend, getNewBuyers } = require("./dashboardQueries");
 
 const AI_SUMMARY_TTL = 6 * 60 * 60 * 1000; // PRD의 "매일 새벽 03:00 갱신"을 단순화한 캐시 주기
 const MODEL = "claude-sonnet-5";
@@ -28,6 +28,63 @@ const SUMMARY_TOOL = {
       },
     },
     required: ["top3", "summaryLines"],
+  },
+};
+
+function cardSchema(desc) {
+  return {
+    type: "object",
+    properties: {
+      hasData: { type: "boolean", description: "이 카드에 실제 근거 데이터가 있는지 여부. 근거 데이터가 없으면 false." },
+      body: { type: "string", description: `${desc} 본문. 순수 텍스트만, 태그·마크업 금지. hasData=false면 지어내지 말고 데이터가 없다는 사실만 짧게 적을 것.` },
+      action: { type: "string", description: "카드 하단에 표시할 추천 실행 한 줄. hasData=false면 빈 문자열." },
+    },
+    required: ["hasData", "body", "action"],
+  };
+}
+
+const INSIGHT_TAB_TOOL = {
+  name: "submit_ai_insight_tab",
+  description: "AI 인사이트 탭의 Executive Summary·인사이트 카드 6종·추천 실행과제를 제출한다. 모든 문장은 마크업이나 태그 없이 순수 텍스트로만 작성한다.",
+  input_schema: {
+    type: "object",
+    properties: {
+      executiveSummary: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 3,
+        maxItems: 3,
+        description: "상단 Executive Summary에 표시할 문장 3개, 배열의 독립된 원소로 — 순서대로 성장 요인 / 리스크 / 다음 과제. 각 원소는 완결된 한 문장이며 순수 텍스트만.",
+      },
+      cards: {
+        type: "object",
+        description: "6종 인사이트 카드. growth/risk/customer/channel은 실제 데이터가 제공되므로 반드시 hasData=true로 구체적 수치를 포함해 작성한다. product/competitor는 근거 데이터가 제공되지 않으므로 반드시 hasData=false로 하고 짧은 안내만 담는다 — 절대로 수치를 지어내지 않는다.",
+        properties: {
+          growth: cardSchema("성장 요인 인사이트"),
+          risk: cardSchema("리스크 인사이트"),
+          product: cardSchema("제품 인사이트"),
+          customer: cardSchema("고객 행동 인사이트"),
+          channel: cardSchema("채널(병의원/도매) 인사이트"),
+          competitor: cardSchema("경쟁품 인사이트"),
+        },
+        required: ["growth", "risk", "product", "customer", "channel", "competitor"],
+      },
+      actionItems: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "실행 과제 내용, 완결된 한 문장, 수치 포함" },
+            effect: { type: "string", description: "기대 효과 한 줄. 실제 데이터에서 나온 것만 — 전환율 예측치 같은 지어낸 수치 금지" },
+          },
+          required: ["text", "effect"],
+        },
+        minItems: 3,
+        maxItems: 5,
+        description: "우선순위 추천 실행과제 3~5개",
+      },
+    },
+    required: ["executiveSummary", "cards", "actionItems"],
   },
 };
 
@@ -141,4 +198,127 @@ function getDashboardAiSummary(filters = {}) {
   });
 }
 
-module.exports = { getDashboardAiSummary };
+// ===== AI 인사이트 탭 (Executive Summary + 카드 6종 + 추천 실행과제) =====
+// 제품별(개별 품목) 매출 추이와 경쟁사 시장점유율(IQVIA 등)은 아직 연동된 데이터 소스가
+// 없어 product/competitor 카드는 hasData=false로 고정 안내만 하도록 프롬프트에서 명시한다.
+async function buildInsightTabContext(filters) {
+  const [kpi, region, dept, buyerSegments, salesType, newBuyers] = await Promise.all([
+    getKpiTrend({ ...filters, months: 2, endMonth: filters.month }),
+    getRegionSales(filters),
+    getDeptSales(filters),
+    getBuyerSegments(filters),
+    getSalesTypeTrend({ ...filters, months: 2, endMonth: filters.month }),
+    getNewBuyers(filters),
+  ]);
+
+  const lastIdx = kpi.months.length - 1;
+  const prevIdx = lastIdx - 1;
+  const churnSeg = buyerSegments.segments.find((s) => s.seg === "이탈위험");
+
+  const currType = salesType[salesType.length - 1];
+  const prevType = salesType[salesType.length - 2];
+  const wholesaleShare = (t) => (t && t.clinic + t.wholesale > 0 ? (t.wholesale / (t.clinic + t.wholesale)) * 100 : null);
+  const currShare = wholesaleShare(currType);
+  const prevShare = wholesaleShare(prevType);
+
+  return {
+    period: kpi.months[lastIdx],
+    company: filters.company || "전체",
+    sales: {
+      curr: kpi.sales.curr[lastIdx],
+      momPct: pct(kpi.sales.curr[lastIdx], kpi.sales.curr[prevIdx]),
+      yoyPct: pct(kpi.sales.curr[lastIdx], kpi.sales.prev[lastIdx]),
+    },
+    qty: {
+      curr: kpi.qty.curr[lastIdx],
+      momPct: pct(kpi.qty.curr[lastIdx], kpi.qty.curr[prevIdx]),
+    },
+    buyerCount: {
+      curr: kpi.buyer.curr[lastIdx],
+      momPct: pct(kpi.buyer.curr[lastIdx], kpi.buyer.curr[prevIdx]),
+    },
+    newBuyers: { total: newBuyers.total, delta: newBuyers.delta },
+    topRegions: region.slice(0, 3),
+    topDepts: dept.slice(0, 3),
+    segments: buyerSegments.segments,
+    churnRisk: churnSeg || null,
+    wholesaleSharePct: currShare,
+    wholesaleShareDeltaPct: currShare != null && prevShare != null ? Math.round((currShare - prevShare) * 10) / 10 : null,
+  };
+}
+
+function buildInsightTabPrompt(ctx) {
+  return `당신은 블루팜코리아 Sales Intelligence Dashboard의 AI 분석가입니다. "${ctx.company}" 파트너 전용 AI 인사이트 탭에 표시할 내용을 작성합니다.
+아래 수치만 근거로 분석하고, 없는 데이터는 절대 추측하거나 지어내지 마세요.
+
+[판매 지표 — ${ctx.period}]
+- 매출: ${ctx.sales.curr.toFixed(2)}억 (전월비 ${fmtPct(ctx.sales.momPct)}, 전년동월비 ${fmtPct(ctx.sales.yoyPct)})
+- 판매수량: ${ctx.qty.curr} (전월비 ${fmtPct(ctx.qty.momPct)})
+- 구매처수: ${ctx.buyerCount.curr} (전월비 ${fmtPct(ctx.buyerCount.momPct)})
+- 신규 구매처: ${ctx.newBuyers.total}곳 (전월비 ${ctx.newBuyers.delta >= 0 ? "+" : ""}${ctx.newBuyers.delta})
+
+[지역/진료과]
+- 지역별 매출 Top3: ${ctx.topRegions.map((r) => `${r.region} ${r.amount.toFixed(2)}억`).join(", ") || "데이터 없음"}
+- 진료과별 매출 Top3: ${ctx.topDepts.map((d) => `${d.dept} ${d.amount.toFixed(2)}억`).join(", ") || "데이터 없음"}
+
+[구매처 세그먼트 — 전월대비 증감]
+${ctx.segments.map((s) => `- ${s.seg}: ${s.count}곳 (${s.deltaCount >= 0 ? "+" : ""}${s.deltaCount})`).join("\n")}
+
+[채널 비중 — 도매]
+- 도매 비중: ${ctx.wholesaleSharePct != null ? ctx.wholesaleSharePct.toFixed(1) + "%" : "데이터 부족"} (전월비 ${ctx.wholesaleShareDeltaPct != null ? (ctx.wholesaleShareDeltaPct >= 0 ? "+" : "") + ctx.wholesaleShareDeltaPct + "%p" : "데이터 부족"})
+
+[제공되지 않는 데이터 — 반드시 hasData=false로 처리]
+- 제품별(개별 품목) 매출/전환율 데이터는 제공되지 않습니다.
+- 경쟁사 시장점유율(IQVIA 등) 데이터는 제공되지 않습니다.
+
+위 도구(submit_ai_insight_tab)를 호출해서 결과를 제출하세요.`;
+}
+
+async function callClaudeForInsightTab(ctx) {
+  const anthropic = getClient();
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 2048,
+    tools: [INSIGHT_TAB_TOOL],
+    tool_choice: { type: "tool", name: INSIGHT_TAB_TOOL.name },
+    messages: [{ role: "user", content: buildInsightTabPrompt(ctx) }],
+  });
+
+  const toolUse = message.content.find((block) => block.type === "tool_use");
+  if (!toolUse) throw new Error("Claude 응답에서 결과를 찾지 못했습니다.");
+
+  const input = toolUse.input || {};
+  const executiveSummary = (Array.isArray(input.executiveSummary) ? input.executiveSummary : [])
+    .map(sanitizeText)
+    .filter(Boolean);
+
+  const sanitizeCard = (card) => ({
+    hasData: Boolean(card && card.hasData),
+    body: sanitizeText(card && card.body),
+    action: sanitizeText(card && card.action),
+  });
+  const cards = {};
+  for (const key of ["growth", "risk", "product", "customer", "channel", "competitor"]) {
+    cards[key] = sanitizeCard(input.cards && input.cards[key]);
+  }
+
+  const actionItems = (Array.isArray(input.actionItems) ? input.actionItems : [])
+    .map((item) => ({ text: sanitizeText(item && item.text), effect: sanitizeText(item && item.effect) }))
+    .filter((item) => item.text);
+
+  return { executiveSummary, cards, actionItems };
+}
+
+function insightTabCacheKeyFor(filters) {
+  const channelsKey = filters.channels && filters.channels.length ? filters.channels.slice().sort().join(",") : "all";
+  return `aiInsightTab:${filters.company || "all"}:${filters.product || "all"}:${filters.region || "all"}:${filters.dept || "all"}:${channelsKey}:${filters.month || "current"}`;
+}
+
+function getAiInsightTab(filters = {}) {
+  return getOrSet(insightTabCacheKeyFor(filters), AI_SUMMARY_TTL, async () => {
+    const ctx = await buildInsightTabContext(filters);
+    return callClaudeForInsightTab(ctx);
+  });
+}
+
+module.exports = { getDashboardAiSummary, getAiInsightTab };
