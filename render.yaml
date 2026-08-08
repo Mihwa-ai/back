@@ -13,3 +13,5 @@ services:
         sync: false
       - key: CRAWL_TRIGGER_SECRET
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

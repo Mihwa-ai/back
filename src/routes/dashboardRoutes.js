@@ -10,6 +10,7 @@ const {
   getCompanies,
   getCompanyProducts,
 } = require("../services/dashboardQueries");
+const { getDashboardAiSummary } = require("../services/aiInsights");
 
 const router = express.Router();
 
@@ -81,6 +82,11 @@ router.get(
 router.get(
   "/buyer-segments",
   handle((req) => getBuyerSegments({ ...commonFilters(req), month: req.query.month }))
+);
+
+router.get(
+  "/ai-summary",
+  handle((req) => getDashboardAiSummary({ ...commonFilters(req), month: req.query.month }))
 );
 
 router.get(

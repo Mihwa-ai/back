@@ -7,6 +7,8 @@ const VENDOR_TTL = 10 * 60 * 1000;
 const CATALOG_TTL = 10 * 60 * 1000;
 const SALES_TTL = 2 * 60 * 1000;
 const FIRST_PURCHASE_TTL = 10 * 60 * 1000;
+const PARTNER_ID_TTL = 10 * 60 * 1000;
+const MART_TTL = 2 * 60 * 1000;
 
 const SIDO_SHORT = {
   "서울특별시": "서울", "서울": "서울",
@@ -378,6 +380,9 @@ function getFirstPurchaseMap(filters) {
 
 async function getNewBuyers(filters = {}) {
   const mk = clampMonth(filters.month || monthKey(new Date().toISOString().slice(0, 10)));
+
+  if (canUseBuyerMart(filters)) return getNewBuyersFromMart(filters, mk);
+
   const monthList = lastNMonthKeys(3, mk);
 
   const [firstSeenMap, vendorLookup] = await Promise.all([getFirstPurchaseMap(filters), getVendorLookup()]);
@@ -424,6 +429,194 @@ async function getNewBuyers(filters = {}) {
     monthly,
     top5,
   };
+}
+
+// ===== mart_buyer_monthly 연동 =====
+// company(제약사)가 선택되어 있고, product(상품 단위 세부 필터)와 channels(매출유형 필터)가
+// 걸려있지 않을 때만 mart_buyer_monthly를 쓴다. 마트의 그레인이 (파트너×거래처×월)이라
+// 상품/매출유형 세부 필터는 표현할 수 없기 때문 — 그 경우는 기존 라이브 계산 경로로 그대로 처리한다.
+function canUseBuyerMart(filters) {
+  return Boolean(filters.company) && !filters.product && !channelsToSaleTypes(filters.channels);
+}
+
+function getPartnerIdByGroupNm(groupNm) {
+  return getOrSet(`partnerId:${groupNm}`, PARTNER_ID_TTL, async () => {
+    const supabase = getSupabase();
+    const { data, error } = await supabase.from("dream_partner").select("id").eq("group_nm", groupNm).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? data.id : null;
+  });
+}
+
+function fetchMartRows(partnerId, startYm, endYm, columns) {
+  const key = `mart:${partnerId}:${startYm}:${endYm}:${columns}`;
+  return getOrSet(key, MART_TTL, async () => {
+    const supabase = getSupabase();
+    const pageSize = 1000;
+    let from = 0;
+    const rows = [];
+    for (;;) {
+      const { data, error } = await supabase
+        .from("mart_buyer_monthly")
+        .select(columns)
+        .eq("partner_id", partnerId)
+        .gte("ym", startYm)
+        .lte("ym", endYm)
+        .range(from, from + pageSize - 1);
+      if (error) throw new Error(error.message);
+      rows.push(...data);
+      if (data.length < pageSize) break;
+      from += pageSize;
+    }
+    return rows;
+  });
+}
+
+function buildVendorPassFilter({ region, dept, vendorLookup }) {
+  if (!region && !dept) return () => true;
+  return (venCd) => {
+    const info = vendorLookup.get(venCd);
+    if (region && (!info || info.sido !== region)) return false;
+    if (dept && (!info || info.subject !== dept)) return false;
+    return true;
+  };
+}
+
+async function getBuyerTrendFromMart(filters, endMonth) {
+  const months12 = lastNMonthKeys(BUYER_TREND_MONTHS, endMonth);
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return { months12, new: months12.map(() => 0), repurchase: months12.map(() => 0), dormant: months12.map(() => 0) };
+
+  const startYm = `${months12[0]}-01`;
+  const endYm = `${endMonth}-01`;
+  const [rows, vendorLookup] = await Promise.all([
+    fetchMartRows(partnerId, startYm, endYm, "ym,ven_cd,is_new_buyer,is_repurchase,dormant_days"),
+    getVendorLookup(),
+  ]);
+  const passesFilter = buildVendorPassFilter({ region: filters.region, dept: filters.dept, vendorLookup });
+
+  const byMonth = new Map(months12.map((mk) => [mk, { new: 0, repurchase: 0, dormant: 0 }]));
+  for (const r of rows) {
+    if (!passesFilter(r.ven_cd)) continue;
+    const bucket = byMonth.get(monthKey(r.ym));
+    if (!bucket) continue;
+    if (r.is_new_buyer) bucket.new += 1;
+    else if (r.is_repurchase) bucket.repurchase += 1;
+    if (r.dormant_days >= 90) bucket.dormant += 1;
+  }
+
+  return {
+    months12,
+    new: months12.map((mk) => byMonth.get(mk).new),
+    repurchase: months12.map((mk) => byMonth.get(mk).repurchase),
+    dormant: months12.map((mk) => byMonth.get(mk).dormant),
+  };
+}
+
+async function getBuyerSegmentsFromMart(filters, endMonth) {
+  const prevMonth = shiftMonth(endMonth, -1);
+  const months12 = lastNMonthKeys(BUYER_TREND_MONTHS, endMonth);
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) {
+    const emptySegments = SEGMENT_ORDER.map((seg) => ({ seg, count: 0, pct: 0, deltaCount: 0 }));
+    return { segments: emptySegments, heatmap12: { months: months12, rows: SEGMENT_ORDER.map((seg) => ({ seg, values: months12.map(() => 0) })) } };
+  }
+
+  const startYm = `${months12[0]}-01`;
+  const endYm = `${endMonth}-01`;
+  const [rows, vendorLookup] = await Promise.all([
+    fetchMartRows(partnerId, startYm, endYm, "ym,ven_cd,order_count,rfm_segment"),
+    getVendorLookup(),
+  ]);
+  const passesFilter = buildVendorPassFilter({ region: filters.region, dept: filters.dept, vendorLookup });
+
+  const byVendorMonthOrders = new Map(); // ven_cd -> Map(ym -> order_count)
+  const segByVendorMonth = new Map(); // ven_cd -> Map(ym -> segment)
+  for (const r of rows) {
+    if (!passesFilter(r.ven_cd)) continue;
+    const mk = monthKey(r.ym);
+    if (!byVendorMonthOrders.has(r.ven_cd)) byVendorMonthOrders.set(r.ven_cd, new Map());
+    byVendorMonthOrders.get(r.ven_cd).set(mk, r.order_count);
+    if (!segByVendorMonth.has(r.ven_cd)) segByVendorMonth.set(r.ven_cd, new Map());
+    segByVendorMonth.get(r.ven_cd).set(mk, r.rfm_segment);
+  }
+
+  const currCounts = Object.fromEntries(SEGMENT_ORDER.map((s) => [s, 0]));
+  const prevCounts = Object.fromEntries(SEGMENT_ORDER.map((s) => [s, 0]));
+  const currAssign = new Map();
+  for (const [venCd, segMap] of segByVendorMonth) {
+    const currSeg = segMap.get(endMonth);
+    if (currSeg) {
+      currCounts[currSeg] += 1;
+      currAssign.set(venCd, currSeg);
+    }
+    const prevSeg = segMap.get(prevMonth);
+    if (prevSeg) prevCounts[prevSeg] += 1;
+  }
+
+  const total = Object.values(currCounts).reduce((a, b) => a + b, 0) || 1;
+  const segments = SEGMENT_ORDER.map((seg) => ({
+    seg,
+    count: currCounts[seg],
+    pct: Math.round((currCounts[seg] / total) * 100),
+    deltaCount: currCounts[seg] - prevCounts[seg],
+  }));
+
+  const heatmapRows = SEGMENT_ORDER.map((seg) => {
+    const vendorsInSeg = [...currAssign.entries()].filter(([, s]) => s === seg).map(([venCd]) => venCd);
+    const values = months12.map((mk) => {
+      if (!vendorsInSeg.length) return 0;
+      let sum = 0;
+      for (const venCd of vendorsInSeg) {
+        const oc = byVendorMonthOrders.get(venCd)?.get(mk);
+        if (oc) sum += oc;
+      }
+      return Math.max(0, Math.min(5, Math.round(sum / vendorsInSeg.length)));
+    });
+    return { seg, values };
+  });
+
+  return { segments, heatmap12: { months: months12, rows: heatmapRows } };
+}
+
+async function getNewBuyersFromMart(filters, mk) {
+  const monthList = lastNMonthKeys(3, mk);
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return { total: 0, delta: 0, monthly: monthList.map((m) => ({ month: m, count: 0 })), top5: [] };
+
+  const startYm = `${monthList[0]}-01`;
+  const endYm = `${mk}-01`;
+  const [rows, vendorLookup] = await Promise.all([
+    fetchMartRows(partnerId, startYm, endYm, "ym,ven_cd,is_new_buyer,total_sales"),
+    getVendorLookup(),
+  ]);
+  const passesFilter = buildVendorPassFilter({ region: filters.region, dept: filters.dept, vendorLookup });
+
+  const monthly = monthList.map((m) => ({ month: m, count: 0 }));
+  const monthIndex = new Map(monthList.map((m, i) => [m, i]));
+  const currentMonthNewRows = [];
+
+  for (const r of rows) {
+    if (!r.is_new_buyer || !passesFilter(r.ven_cd)) continue;
+    const mkRow = monthKey(r.ym);
+    const idx = monthIndex.get(mkRow);
+    if (idx === undefined) continue;
+    monthly[idx].count += 1;
+    if (mkRow === mk) currentMonthNewRows.push(r);
+  }
+
+  const prevMonthCount = monthly[monthly.length - 2]?.count || 0;
+  const currentCount = monthly[monthly.length - 1]?.count || 0;
+
+  const top5 = currentMonthNewRows
+    .sort((a, b) => Number(b.total_sales) - Number(a.total_sales))
+    .slice(0, 5)
+    .map((r) => {
+      const info = vendorLookup.get(r.ven_cd);
+      return { name: info?.name || r.ven_cd, dept: info?.subject || "" };
+    });
+
+  return { total: currentCount, delta: currentCount - prevMonthCount, monthly, top5 };
 }
 
 // ===== 구매처 분석 (RFM 세그먼트 / 신규·재구매·휴면 추이) =====
@@ -492,6 +685,9 @@ async function getBuyerActivity(filters, endMonth) {
 
 async function getBuyerTrend(filters = {}) {
   const endMonth = clampMonth(filters.month || monthKey(new Date().toISOString().slice(0, 10)));
+
+  if (canUseBuyerMart(filters)) return getBuyerTrendFromMart(filters, endMonth);
+
   const months12 = lastNMonthKeys(BUYER_TREND_MONTHS, endMonth);
   const displaySet = new Set(months12);
   const { byVendor, firstSeenMap, rangeStartMonth } = await getBuyerActivity(filters, endMonth);
@@ -584,6 +780,9 @@ function classifyVendors(byVendor, firstSeenMap, asOfMonth) {
 
 async function getBuyerSegments(filters = {}) {
   const endMonth = clampMonth(filters.month || monthKey(new Date().toISOString().slice(0, 10)));
+
+  if (canUseBuyerMart(filters)) return getBuyerSegmentsFromMart(filters, endMonth);
+
   const prevMonth = shiftMonth(endMonth, -1);
   const { byVendor, firstSeenMap } = await getBuyerActivity(filters, endMonth);
 

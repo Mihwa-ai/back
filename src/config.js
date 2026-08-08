@@ -12,5 +12,6 @@ module.exports = {
   SUPABASE_URL: required("SUPABASE_URL"),
   SUPABASE_SERVICE_ROLE_KEY: required("SUPABASE_SERVICE_ROLE_KEY"),
   CRAWL_TRIGGER_SECRET: required("CRAWL_TRIGGER_SECRET"),
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || null,
   PORT: process.env.PORT || 3000,
 };

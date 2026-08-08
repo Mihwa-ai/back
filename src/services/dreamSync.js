@@ -14,29 +14,29 @@ function uniqueNonEmpty(values) {
   return Array.from(new Set(values.filter((v) => v !== null && v !== undefined && v !== "")));
 }
 
-// 코드 배열 → {코드: id} 맵. Supabase에서 단순 조회
-async function fetchIdMap(codes, table, codeField) {
-  if (!codes.length) return {};
+// 코드 배열 중 테이블에 실제 존재하는 코드만 Set으로 반환.
+// dream_vendor/dream_product는 자연키(ven_cd/physic_cd)가 PK라 대리키 id가 없으므로
+// 코드 자체의 존재 여부만 확인한다.
+async function fetchExistingCodes(codes, table, codeField) {
+  if (!codes.length) return new Set();
 
   const supabase = getSupabase();
-  const idMap = {};
+  const found = new Set();
   for (const codesChunk of chunk(codes, CHUNK_SIZE)) {
-    const { data, error } = await supabase.from(table).select(`id,${codeField}`).in(codeField, codesChunk);
+    const { data, error } = await supabase.from(table).select(codeField).in(codeField, codesChunk);
     if (error) throw error;
-    for (const row of data) {
-      idMap[row[codeField]] = row.id;
-    }
+    for (const row of data) found.add(row[codeField]);
   }
-  return idMap;
+  return found;
 }
 
-// 거래처 코드 배열 → {ven_cd: id} 맵. 없는 코드는 vendorMasterRows에서 찾아 upsert 후 재조회
-async function resolveVendorIdMap(venCds, vendorMasterRows) {
-  if (!venCds.length) return {};
+// 거래처 코드 배열 → dream_vendor에 존재하는 코드 Set. 없는 코드는 vendorMasterRows에서 찾아 upsert
+async function resolveVendorCodes(venCds, vendorMasterRows) {
+  if (!venCds.length) return new Set();
 
-  const idMap = await fetchIdMap(venCds, "dream_vendor", "ven_cd");
-  const missing = venCds.filter((cd) => !(cd in idMap));
-  if (!missing.length) return idMap;
+  const existing = await fetchExistingCodes(venCds, "dream_vendor", "ven_cd");
+  const missing = venCds.filter((cd) => !existing.has(cd));
+  if (!missing.length) return existing;
 
   const missingSet = new Set(missing);
   const rowsToUpsert = vendorMasterRows
@@ -56,20 +56,20 @@ async function resolveVendorIdMap(venCds, vendorMasterRows) {
       const { error } = await supabase.from("dream_vendor").upsert(rowsChunk, { onConflict: "ven_cd" });
       if (error) throw error;
     }
+    for (const row of rowsToUpsert) existing.add(row.ven_cd);
   }
 
-  const refetched = await fetchIdMap(missing, "dream_vendor", "ven_cd");
-  return { ...idMap, ...refetched };
+  return existing;
 }
 
-// 상품 코드 배열 → {physic_cd: id} 맵. 없는 코드는 productMasterRows에서 찾아
-// dream_partner의 physic_cd_filter로 파트너 대상만 걸러 upsert 후 재조회
-async function resolveProductIdMap(physicCds, productMasterRows) {
-  if (!physicCds.length) return {};
+// 상품 코드 배열 → dream_product에 존재하는 코드 Set. 없는 코드는 productMasterRows에서 찾아
+// dream_partner의 physic_cd_filter로 파트너 대상만 걸러 upsert
+async function resolveProductCodes(physicCds, productMasterRows) {
+  if (!physicCds.length) return new Set();
 
-  const idMap = await fetchIdMap(physicCds, "dream_product", "physic_cd");
-  const missing = physicCds.filter((cd) => !(cd in idMap));
-  if (!missing.length) return idMap;
+  const existing = await fetchExistingCodes(physicCds, "dream_product", "physic_cd");
+  const missing = physicCds.filter((cd) => !existing.has(cd));
+  if (!missing.length) return existing;
 
   const supabase = getSupabase();
   const { data: partners, error: partnerError } = await supabase
@@ -109,10 +109,10 @@ async function resolveProductIdMap(physicCds, productMasterRows) {
       const { error } = await supabase.from("dream_product").upsert(rowsChunk, { onConflict: "physic_cd" });
       if (error) throw error;
     }
+    for (const row of rowsToUpsert) existing.add(row.physic_cd);
   }
 
-  const refetched = await fetchIdMap(missing, "dream_product", "physic_cd");
-  return { ...idMap, ...refetched };
+  return existing;
 }
 
 function makeSaleBase(row, saleDate, saleType) {
@@ -147,33 +147,32 @@ async function syncSales({ saleDate, salesRows, vendorMasterRows, productMasterR
   const rows = salesRows.map(normalizeSalesRow);
 
   const allProductCds = uniqueNonEmpty(rows.map((r) => r.PRODUCT_CD));
-  const productIdMap = await resolveProductIdMap(allProductCds, productMasterRows);
+  const productCodes = await resolveProductCodes(allProductCds, productMasterRows);
 
   // 상품마스터엔 존재하지만 파트너 대상이 아니라 매칭 안 된 코드는 실패목록에서 제외
   const productMasterCds = new Set(productMasterRows.map((r) => r.Physic_Cd));
-  const partnerNotMatched = new Set(allProductCds.filter((cd) => !(cd in productIdMap) && productMasterCds.has(cd)));
+  const partnerNotMatched = new Set(allProductCds.filter((cd) => !productCodes.has(cd) && productMasterCds.has(cd)));
 
-  const matchedRows = rows.filter((r) => r.PRODUCT_CD in productIdMap);
-  const unmatchedRows = rows.filter((r) => !(r.PRODUCT_CD in productIdMap));
+  const matchedRows = rows.filter((r) => productCodes.has(r.PRODUCT_CD));
+  const unmatchedRows = rows.filter((r) => !productCodes.has(r.PRODUCT_CD));
 
   const matchedVenCds = uniqueNonEmpty(matchedRows.map((r) => r.VEN_CD));
-  const vendorIdMap = await resolveVendorIdMap(matchedVenCds, vendorMasterRows);
+  const vendorCodes = await resolveVendorCodes(matchedVenCds, vendorMasterRows);
 
   const salesInsert = [];
   const failedInsert = [];
 
   for (const r of matchedRows) {
     const saleType = r.IO_GU === "매출" ? "매출" : "도매";
-    const vendorId = vendorIdMap[r.VEN_CD];
-    if (!vendorId) {
+    if (!vendorCodes.has(r.VEN_CD)) {
       failedInsert.push({ fail_reason: "vendor_not_found", ...makeSaleBase(r, saleDate, saleType) });
       continue;
     }
     salesInsert.push({
       sale_date: saleDate,
       sale_type: saleType,
-      vendor_id: vendorId,
-      product_id: productIdMap[r.PRODUCT_CD],
+      ven_cd: r.VEN_CD,
+      product_cd: r.PRODUCT_CD,
       price: r.price,
       qty: r.qty,
     });
@@ -204,4 +203,4 @@ async function syncSales({ saleDate, salesRows, vendorMasterRows, productMasterR
   return { successCount: salesInsert.length, failCount: failedInsert.length };
 }
 
-module.exports = { resolveVendorIdMap, resolveProductIdMap, syncSales };
+module.exports = { resolveVendorCodes, resolveProductCodes, syncSales };
