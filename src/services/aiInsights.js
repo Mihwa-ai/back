@@ -61,7 +61,7 @@ function fmtPct(v) {
 
 async function buildContext(filters) {
   const [kpi, region, dept, buyerSegments] = await Promise.all([
-    getKpiTrend({ ...filters, months: 2 }),
+    getKpiTrend({ ...filters, months: 2, endMonth: filters.month }),
     getRegionSales(filters),
     getDeptSales(filters),
     getBuyerSegments(filters),
