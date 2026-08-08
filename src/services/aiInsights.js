@@ -8,7 +8,7 @@ const MODEL = "claude-sonnet-5";
 
 const SUMMARY_TOOL = {
   name: "submit_dashboard_summary",
-  description: "대시보드 AI 인사이트 결과를 제출한다",
+  description: "대시보드 AI 인사이트 결과를 제출한다. 모든 문장은 마크업이나 태그 없이 순수 텍스트로만 작성한다.",
   input_schema: {
     type: "object",
     properties: {
@@ -17,16 +17,28 @@ const SUMMARY_TOOL = {
         items: { type: "string" },
         minItems: 3,
         maxItems: 3,
-        description: "공통 필터 영역 상단에 표시할 핵심 인사이트 3개 — 성장 요인/리스크/추천 실행과제 순으로 각 1문장, 반드시 수치를 포함",
+        description: "공통 필터 영역 상단에 표시할 핵심 인사이트 3개 — 성장 요인/리스크/추천 실행과제 순으로 각 1개의 완결된 문장, 반드시 수치를 포함. 순수 텍스트만, 태그나 마크업 금지.",
       },
-      summary: {
-        type: "string",
-        description: "매출 대시보드 탭 하단 '대시보드 분석 요약' 카드에 표시할 3줄 요약. 줄바꿈(\\n)으로 구분된 3문장 — 핵심 변화 원인 → 리스크/기회 → 다음 액션 순서",
+      summaryLines: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 3,
+        maxItems: 3,
+        description: "매출 대시보드 탭 하단 '대시보드 분석 요약' 카드에 표시할 문장 3개, 각각 배열의 독립된 원소로 — 순서대로 핵심 변화 원인 / 리스크·기회 / 다음 액션. 각 원소는 그 자체로 완결된 한 문장이며, 순수 텍스트만 사용하고 태그·마크업·다른 원소 참조를 포함하지 않는다.",
       },
     },
-    required: ["top3", "summary"],
+    required: ["top3", "summaryLines"],
   },
 };
+
+// 모델이 가끔 응답 끝에 엉뚱한 태그(예: </summary>, <parameter ...>)를 덧붙이는 경우가 있어,
+// 화면에 그대로 노출되지 않도록 태그 이후는 잘라내고 태그 자체도 제거한다.
+function sanitizeText(s) {
+  if (typeof s !== "string") return "";
+  const tagStart = s.search(/<\/?[a-zA-Z_][^>]*>/);
+  const cut = tagStart >= 0 ? s.slice(0, tagStart) : s;
+  return cut.replace(/\\n/g, " ").trim();
+}
 
 let client = null;
 function getClient() {
@@ -108,7 +120,13 @@ async function callClaude(ctx) {
 
   const toolUse = message.content.find((block) => block.type === "tool_use");
   if (!toolUse) throw new Error("Claude 응답에서 결과를 찾지 못했습니다.");
-  return toolUse.input;
+
+  const top3 = (Array.isArray(toolUse.input.top3) ? toolUse.input.top3 : []).map(sanitizeText).filter(Boolean);
+  const summaryLines = (Array.isArray(toolUse.input.summaryLines) ? toolUse.input.summaryLines : [])
+    .map(sanitizeText)
+    .filter(Boolean);
+
+  return { top3, summary: summaryLines.join("\n") };
 }
 
 function cacheKeyFor(filters) {
