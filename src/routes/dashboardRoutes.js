@@ -1,4 +1,5 @@
 const express = require("express");
+const multer = require("multer");
 const {
   getKpiTrend,
   getSalesTypeTrend,
@@ -14,12 +15,17 @@ const {
   deleteCampaign,
   getPartnerHistory,
   addPartnerHistoryEntry,
+  updatePartnerHistoryEntry,
+  deletePartnerHistoryEntry,
+  addPartnerHistoryAttachment,
+  deletePartnerHistoryAttachment,
   getPartnerReportDownloads,
   logPartnerReportDownload,
 } = require("../services/dashboardQueries");
 const { getDashboardAiSummary, getAiInsightTab, getBuyerAnalysisAiSummary } = require("../services/aiInsights");
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 function handle(fn) {
   return async (req, res) => {
@@ -123,12 +129,39 @@ router.delete(
 
 router.get(
   "/partner-history",
-  handle((req) => getPartnerHistory(commonFilters(req)))
+  handle((req) =>
+    getPartnerHistory({
+      ...commonFilters(req),
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+    })
+  )
 );
 
 router.post(
   "/partner-history",
   handle((req) => addPartnerHistoryEntry(commonFilters(req), req.body))
+);
+
+router.put(
+  "/partner-history/:id",
+  handle((req) => updatePartnerHistoryEntry(commonFilters(req), req.params.id, req.body))
+);
+
+router.delete(
+  "/partner-history/:id",
+  handle((req) => deletePartnerHistoryEntry(commonFilters(req), req.params.id))
+);
+
+router.post(
+  "/partner-history/:id/attachments",
+  upload.single("file"),
+  handle((req) => addPartnerHistoryAttachment(commonFilters(req), req.params.id, req.file))
+);
+
+router.delete(
+  "/partner-history/attachments/:id",
+  handle((req) => deletePartnerHistoryAttachment(commonFilters(req), req.params.id))
 );
 
 router.get(

@@ -1020,14 +1020,21 @@ async function getPartnerHistory(filters = {}) {
   if (partnerId == null) return [];
 
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  let query = supabase
     .from("partner_history_entries")
-    .select("id, entry_date, entry_type, content, created_at")
-    .eq("partner_id", partnerId)
+    .select("id, entry_date, entry_type, content, created_at, partner_history_attachments(id, file_name, file_url, uploaded_at)")
+    .eq("partner_id", partnerId);
+  if (filters.startDate) query = query.gte("entry_date", filters.startDate);
+  if (filters.endDate) query = query.lte("entry_date", filters.endDate);
+  const { data, error } = await query
     .order("entry_date", { ascending: false })
     .order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
-  return data;
+  return data.map((row) => ({
+    ...row,
+    attachments: (row.partner_history_attachments || []).sort((a, b) => new Date(a.uploaded_at) - new Date(b.uploaded_at)),
+    partner_history_attachments: undefined,
+  }));
 }
 
 async function addPartnerHistoryEntry(filters, payload) {
@@ -1049,6 +1056,116 @@ async function addPartnerHistoryEntry(filters, payload) {
     .single();
   if (error) throw new Error(error.message);
   return data;
+}
+
+async function updatePartnerHistoryEntry(filters, entryId, payload) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(entryId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 기록 id입니다.");
+  if (!payload.content) throw new Error("내용을 입력하세요.");
+  if (!payload.entryDate) throw new Error("날짜를 입력하세요.");
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_history_entries")
+    .update({
+      entry_date: payload.entryDate,
+      entry_type: payload.entryType || "메모",
+      content: payload.content,
+    })
+    .eq("id", id)
+    .eq("partner_id", partnerId)
+    .select()
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("해당 기록을 찾을 수 없습니다.");
+  return data;
+}
+
+async function deletePartnerHistoryEntry(filters, entryId) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(entryId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 기록 id입니다.");
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_history_entries")
+    .delete()
+    .eq("id", id)
+    .eq("partner_id", partnerId)
+    .select()
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("해당 기록을 찾을 수 없습니다.");
+  return { ok: true };
+}
+
+async function verifyHistoryEntryOwnership(partnerId, entryId) {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_history_entries")
+    .select("id")
+    .eq("id", entryId)
+    .eq("partner_id", partnerId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("해당 기록을 찾을 수 없습니다.");
+}
+
+async function addPartnerHistoryAttachment(filters, entryId, file) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(entryId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 기록 id입니다.");
+  if (!file) throw new Error("첨부할 파일이 없습니다.");
+  await verifyHistoryEntryOwnership(partnerId, id);
+
+  const supabase = getSupabase();
+  const safeName = file.originalname.replace(/[^\w.\-가-힣 ]/g, "_");
+  const storagePath = `${partnerId}/${id}/${Date.now()}_${safeName}`;
+  const { error: uploadError } = await supabase.storage
+    .from("partner-attachments")
+    .upload(storagePath, file.buffer, { contentType: file.mimetype });
+  if (uploadError) throw new Error(uploadError.message);
+
+  const { data: urlData } = supabase.storage.from("partner-attachments").getPublicUrl(storagePath);
+
+  const { data, error } = await supabase
+    .from("partner_history_attachments")
+    .insert({
+      entry_id: id,
+      file_name: file.originalname,
+      storage_path: storagePath,
+      file_url: urlData.publicUrl,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function deletePartnerHistoryAttachment(filters, attachmentId) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(attachmentId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 첨부파일 id입니다.");
+
+  const supabase = getSupabase();
+  const { data: att, error: fetchErr } = await supabase
+    .from("partner_history_attachments")
+    .select("id, storage_path, entry_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (fetchErr) throw new Error(fetchErr.message);
+  if (!att) throw new Error("해당 첨부파일을 찾을 수 없습니다.");
+  await verifyHistoryEntryOwnership(partnerId, att.entry_id);
+
+  await supabase.storage.from("partner-attachments").remove([att.storage_path]);
+  const { error } = await supabase.from("partner_history_attachments").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
 }
 
 async function getPartnerReportDownloads(filters = {}) {
@@ -1099,6 +1216,10 @@ module.exports = {
   deleteCampaign,
   getPartnerHistory,
   addPartnerHistoryEntry,
+  updatePartnerHistoryEntry,
+  deletePartnerHistoryEntry,
+  addPartnerHistoryAttachment,
+  deletePartnerHistoryAttachment,
   getPartnerReportDownloads,
   logPartnerReportDownload,
 };
