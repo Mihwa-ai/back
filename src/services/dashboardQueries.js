@@ -1181,7 +1181,7 @@ async function getPartnerReportDownloads(filters = {}) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("partner_report_downloads")
-    .select("id, report_type, tab_name, downloaded_at")
+    .select("id, report_type, tab_name, downloaded_at, file_name, file_url, company_name, period_label, filters_snapshot")
     .eq("partner_id", partnerId)
     .order("downloaded_at", { ascending: false })
     .limit(50);
@@ -1191,15 +1191,42 @@ async function getPartnerReportDownloads(filters = {}) {
 
 // 회사가 아직 선택 안 된 상태로 다운로드하면 partnerId가 없어 조용히 스킵한다 —
 // 로그 기록 실패로 실제 PDF/PPT 다운로드 자체를 막을 이유는 없다.
-async function logPartnerReportDownload(filters, payload) {
+// 프론트에서 실제로 생성한 PDF/PPT 파일 바이트를 그대로 받아 스토리지에 저장해두면,
+// 이력 화면에서 "다시 다운로드"로 그때 그 파일을 그대로 다시 받을 수 있다.
+async function logPartnerReportDownloadFile(filters, payload, file) {
   const partnerId = await getPartnerIdByGroupNm(filters.company);
   if (partnerId == null) return null;
+  if (!file) throw new Error("업로드할 파일이 없습니다.");
 
   const supabase = getSupabase();
+  const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
+  const safeName = originalName.replace(/[^\w.-]/g, "_");
+  const storagePath = `${partnerId}/${Date.now()}_${safeName}`;
+  const { error: uploadError } = await supabase.storage
+    .from("report-downloads")
+    .upload(storagePath, file.buffer, { contentType: file.mimetype });
+  if (uploadError) throw new Error(uploadError.message);
+  const { data: urlData } = supabase.storage.from("report-downloads").getPublicUrl(storagePath);
+
+  let filtersSnapshot = null;
+  if (payload.filtersSnapshot) {
+    try {
+      filtersSnapshot = JSON.parse(payload.filtersSnapshot);
+    } catch {
+      filtersSnapshot = null;
+    }
+  }
+
   const { error } = await supabase.from("partner_report_downloads").insert({
     partner_id: partnerId,
     report_type: payload.reportType,
     tab_name: payload.tabName || null,
+    file_name: originalName,
+    storage_path: storagePath,
+    file_url: urlData.publicUrl,
+    company_name: payload.companyName || null,
+    period_label: payload.periodLabel || null,
+    filters_snapshot: filtersSnapshot,
   });
   if (error) throw new Error(error.message);
   return true;
@@ -1227,5 +1254,5 @@ module.exports = {
   addPartnerHistoryAttachment,
   deletePartnerHistoryAttachment,
   getPartnerReportDownloads,
-  logPartnerReportDownload,
+  logPartnerReportDownloadFile,
 };
