@@ -887,7 +887,10 @@ function toEok(v) {
   return Math.round((v / 100000000) * 100) / 100;
 }
 
-async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, productCd) {
+// 진료과는 dream_vendor_sales/dream_product에는 없고 dream_vendor.subject에만 있어서
+// RPC 단계에서 필터할 수 없다. 거래처별로 집계된 결과를 받은 뒤 JS에서 걸러낸다
+// (getDeptSales 등 기존 화면들과 동일한 방식).
+async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, productCd, targetDept, vendorLookup) {
   const supabase = getSupabase();
   const { data, error } = await supabase.rpc("dashboard_period_buyer_agg", {
     p_partner_id: partnerId,
@@ -896,8 +899,11 @@ async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, produ
     p_product_cd: productCd || null,
   });
   if (error) throw new Error(error.message);
-  const buyers = new Set(data.map((r) => r.ven_cd));
-  const totalSales = data.reduce((sum, r) => sum + (Number(r.price) || 0), 0);
+  const rows = targetDept
+    ? data.filter((r) => vendorLookup.get(r.ven_cd)?.subject === targetDept)
+    : data;
+  const buyers = new Set(rows.map((r) => r.ven_cd));
+  const totalSales = rows.reduce((sum, r) => sum + (Number(r.price) || 0), 0);
   return { buyers, totalSales };
 }
 
@@ -906,15 +912,16 @@ async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, produ
 // 캠페인 기간에도 다시 산 비율 — 캠페인이라는 한 이벤트를 기준으로 한 전/후 비교이므로,
 // 거래처의 평생 첫구매 여부가 아니라 이 두 기간만 비교한다.
 async function computeCampaignPerformance(partnerId, campaign) {
-  const { start_date: startDate, end_date: endDate, target_product_code: targetProductCode, budget } = campaign;
+  const { start_date: startDate, end_date: endDate, target_product_code: targetProductCode, target_dept: targetDept, budget } = campaign;
   const campaignRangeEnd = addDays(endDate, 1);
   const lengthDays = daysBetween(startDate, endDate) + 1;
   const priorRangeStart = addDays(startDate, -lengthDays);
   const priorRangeEnd = startDate;
 
+  const vendorLookup = targetDept ? await getVendorLookup() : null;
   const [curr, prior] = await Promise.all([
-    computeCampaignPeriodStats(partnerId, startDate, campaignRangeEnd, targetProductCode),
-    computeCampaignPeriodStats(partnerId, priorRangeStart, priorRangeEnd, targetProductCode),
+    computeCampaignPeriodStats(partnerId, startDate, campaignRangeEnd, targetProductCode, targetDept, vendorLookup),
+    computeCampaignPeriodStats(partnerId, priorRangeStart, priorRangeEnd, targetProductCode, targetDept, vendorLookup),
   ]);
 
   // targetProductCode가 없으면 Uplift가 파트너 전체 매출 기준이라 캠페인 예산과 비교할
@@ -947,7 +954,7 @@ async function getCampaigns(filters = {}) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("dim_campaign")
-    .select("id, campaign_name, campaign_type, start_date, end_date, target_product_code, budget, target_segment, created_at")
+    .select("id, campaign_name, campaign_type, start_date, end_date, target_product_code, budget, target_segment, target_dept, created_at")
     .eq("partner_id", partnerId)
     .order("start_date", { ascending: false });
   if (error) throw new Error(error.message);
@@ -979,6 +986,7 @@ async function createCampaign(filters, payload) {
       target_product_code: payload.targetProductCode || null,
       budget: payload.budget || 0,
       target_segment: payload.targetSegment || null,
+      target_dept: payload.targetDept || null,
     })
     .select()
     .single();
