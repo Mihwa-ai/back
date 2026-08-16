@@ -207,7 +207,7 @@ function buildRowFilter({ region, dept, channels, vendorLookup }) {
 }
 
 async function getKpiTrend(filters = {}) {
-  const { months = 11, endMonth } = filters;
+  const { months = 12, endMonth } = filters;
   const end = clampMonth(endMonth || monthKey(new Date().toISOString().slice(0, 10)));
   const currMonths = lastNMonthKeys(months, end);
   const prevMonths = currMonths.map((m) => shiftMonth(m, -12));
