@@ -11,6 +11,7 @@ const {
   getCompanyProducts,
   getCampaigns,
   createCampaign,
+  deleteCampaign,
   getPartnerHistory,
   addPartnerHistoryEntry,
   getPartnerReportDownloads,
@@ -113,6 +114,11 @@ router.get(
 router.post(
   "/campaigns",
   handle((req) => createCampaign(commonFilters(req), req.body))
+);
+
+router.delete(
+  "/campaigns/:id",
+  handle((req) => deleteCampaign(commonFilters(req), req.params.id))
 );
 
 router.get(

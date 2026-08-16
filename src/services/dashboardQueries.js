@@ -986,6 +986,26 @@ async function createCampaign(filters, payload) {
   return data;
 }
 
+async function deleteCampaign(filters, campaignId) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(campaignId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 캠페인 id입니다.");
+
+  const supabase = getSupabase();
+  // partner_id도 함께 걸어서, 다른 회사 소속 캠페인 id를 잘못 넘겨도 지워지지 않게 한다.
+  const { data, error } = await supabase
+    .from("dim_campaign")
+    .delete()
+    .eq("id", id)
+    .eq("partner_id", partnerId)
+    .select()
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("해당 캠페인을 찾을 수 없습니다.");
+  return { ok: true };
+}
+
 // ===== 파트너 히스토리 (S08) =====
 async function getPartnerHistory(filters = {}) {
   const partnerId = await getPartnerIdByGroupNm(filters.company);
@@ -1068,6 +1088,7 @@ module.exports = {
   getDistinctDepts,
   getCampaigns,
   createCampaign,
+  deleteCampaign,
   getPartnerHistory,
   addPartnerHistoryEntry,
   getPartnerReportDownloads,
