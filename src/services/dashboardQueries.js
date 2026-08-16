@@ -1126,7 +1126,10 @@ async function addPartnerHistoryAttachment(filters, entryId, file) {
   // multer/busboy는 multipart 파트의 파일명을 latin1로 디코딩하므로, UTF-8(한글) 파일명이
   // 여기서 깨져 들어온다. latin1 -> utf8로 재해석해 원래 문자열을 복원한다.
   const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
-  const safeName = originalName.replace(/[^\w.\-가-힣 ]/g, "_");
+  // Supabase Storage의 오브젝트 키는 한글 등 비-ASCII 문자를 거부한다("Invalid key").
+  // 화면에 보여줄 file_name은 originalName(한글 포함)을 그대로 쓰고, 스토리지 경로만
+  // ASCII로 정리한다.
+  const safeName = originalName.replace(/[^\w.-]/g, "_");
   const storagePath = `${partnerId}/${id}/${Date.now()}_${safeName}`;
   const { error: uploadError } = await supabase.storage
     .from("partner-attachments")
