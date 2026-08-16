@@ -561,13 +561,15 @@ async function getBuyerSegmentsFromMart(filters, endMonth) {
   const heatmapRows = SEGMENT_ORDER.map((seg) => {
     const vendorsInSeg = [...currAssign.entries()].filter(([, s]) => s === seg).map(([venCd]) => venCd);
     const values = months12.map((mk) => {
-      if (!vendorsInSeg.length) return 0;
-      let sum = 0;
+      // 세그먼트 전체 인원으로 나누면 큰 세그먼트(예: 이탈위험 수천 곳)는 그달 실제
+      // 구매자가 소수여도 평균이 0으로 희석된다. 그달 실제 구매한 거래처 수로만 나눈다.
+      let sum = 0, activeCount = 0;
       for (const venCd of vendorsInSeg) {
         const oc = byVendorMonthOrders.get(venCd)?.get(mk);
-        if (oc) sum += oc;
+        if (oc) { sum += oc; activeCount += 1; }
       }
-      return Math.max(0, Math.min(5, Math.round(sum / vendorsInSeg.length)));
+      if (!activeCount) return 0;
+      return Math.max(0, Math.min(5, Math.round(sum / activeCount)));
     });
     const avgCycleDays = avgCycleDaysForSegment(vendorsInSeg, months12, (venCd, mk) => byVendorMonthOrders.get(venCd)?.get(mk));
     return { seg, values, avgCycleDays };
@@ -828,13 +830,15 @@ async function getBuyerSegments(filters = {}) {
   const rows = SEGMENT_ORDER.map((seg) => {
     const vendorsInSeg = [...currAssign.entries()].filter(([, s]) => s === seg).map(([venCd]) => venCd);
     const values = months12.map((mk) => {
-      if (!vendorsInSeg.length) return 0;
-      let sum = 0;
+      // 세그먼트 전체 인원으로 나누면 큰 세그먼트(예: 이탈위험 수천 곳)는 그달 실제
+      // 구매자가 소수여도 평균이 0으로 희석된다. 그달 실제 구매한 거래처 수로만 나눈다.
+      let sum = 0, activeCount = 0;
       for (const venCd of vendorsInSeg) {
         const v = byVendor.get(venCd)?.get(mk);
-        if (v) sum += v.orderCount;
+        if (v) { sum += v.orderCount; activeCount += 1; }
       }
-      return Math.max(0, Math.min(5, Math.round(sum / vendorsInSeg.length)));
+      if (!activeCount) return 0;
+      return Math.max(0, Math.min(5, Math.round(sum / activeCount)));
     });
     const avgCycleDays = avgCycleDaysForSegment(vendorsInSeg, months12, (venCd, mk) => byVendor.get(venCd)?.get(mk)?.orderCount);
     return { seg, values, avgCycleDays };
