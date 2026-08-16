@@ -872,6 +872,183 @@ async function getDistinctDepts() {
   return [...new Set([...vendorLookup.values()].map((v) => v.subject))].sort((a, b) => a.localeCompare(b, "ko"));
 }
 
+// ===== 캠페인 성과 (S06) =====
+function addDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetween(a, b) {
+  return Math.round((new Date(`${b}T00:00:00Z`) - new Date(`${a}T00:00:00Z`)) / 86400000);
+}
+
+function toEok(v) {
+  return Math.round((v / 100000000) * 100) / 100;
+}
+
+async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, productCd) {
+  const supabase = getSupabase();
+  const { data, error } = await supabase.rpc("dashboard_period_buyer_agg", {
+    p_partner_id: partnerId,
+    range_start: rangeStart,
+    range_end: rangeEnd,
+    product_cd: productCd || null,
+  });
+  if (error) throw new Error(error.message);
+  const buyers = new Set(data.map((r) => r.ven_cd));
+  const totalSales = data.reduce((sum, r) => sum + (Number(r.price) || 0), 0);
+  return { buyers, totalSales };
+}
+
+// Uplift = 캠페인 기간 매출 - 직전 동일 기간 매출, ROI = (Uplift - 예산) / 예산 × 100 (PRD 정의 그대로).
+// 신규 구매처 = 캠페인 기간엔 샀지만 직전 기간엔 안 산 거래처. 재구매율 = 직전 기간 구매처 중
+// 캠페인 기간에도 다시 산 비율 — 캠페인이라는 한 이벤트를 기준으로 한 전/후 비교이므로,
+// 거래처의 평생 첫구매 여부가 아니라 이 두 기간만 비교한다.
+async function computeCampaignPerformance(partnerId, campaign) {
+  const { start_date: startDate, end_date: endDate, target_product_code: targetProductCode, budget } = campaign;
+  const campaignRangeEnd = addDays(endDate, 1);
+  const lengthDays = daysBetween(startDate, endDate) + 1;
+  const priorRangeStart = addDays(startDate, -lengthDays);
+  const priorRangeEnd = startDate;
+
+  const [curr, prior] = await Promise.all([
+    computeCampaignPeriodStats(partnerId, startDate, campaignRangeEnd, targetProductCode),
+    computeCampaignPeriodStats(partnerId, priorRangeStart, priorRangeEnd, targetProductCode),
+  ]);
+
+  const upliftRaw = curr.totalSales - prior.totalSales;
+  const roiPct = budget > 0 ? Math.round(((upliftRaw - budget) / budget) * 1000) / 10 : null;
+  const newBuyerCount = [...curr.buyers].filter((v) => !prior.buyers.has(v)).length;
+  const repeatBuyerCount = [...curr.buyers].filter((v) => prior.buyers.has(v)).length;
+  const repurchaseRatePct = prior.buyers.size > 0 ? Math.round((repeatBuyerCount / prior.buyers.size) * 1000) / 10 : null;
+
+  return {
+    currSalesEok: toEok(curr.totalSales),
+    priorSalesEok: toEok(prior.totalSales),
+    upliftEok: toEok(upliftRaw),
+    roiPct,
+    currBuyerCount: curr.buyers.size,
+    priorBuyerCount: prior.buyers.size,
+    newBuyerCount,
+    repurchaseRatePct,
+  };
+}
+
+async function getCampaigns(filters = {}) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return [];
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("dim_campaign")
+    .select("id, campaign_name, campaign_type, start_date, end_date, target_product_code, budget, target_segment, created_at")
+    .eq("partner_id", partnerId)
+    .order("start_date", { ascending: false });
+  if (error) throw new Error(error.message);
+
+  return Promise.all(
+    data.map(async (c) => ({
+      ...c,
+      budgetEok: toEok(Number(c.budget) || 0),
+      ...(await computeCampaignPerformance(partnerId, c)),
+    }))
+  );
+}
+
+async function createCampaign(filters, payload) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  if (!payload.campaignName) throw new Error("캠페인명을 입력하세요.");
+  if (!payload.startDate || !payload.endDate) throw new Error("캠페인 기간을 입력하세요.");
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("dim_campaign")
+    .insert({
+      partner_id: partnerId,
+      campaign_name: payload.campaignName,
+      campaign_type: payload.campaignType || null,
+      start_date: payload.startDate,
+      end_date: payload.endDate,
+      target_product_code: payload.targetProductCode || null,
+      budget: payload.budget || 0,
+      target_segment: payload.targetSegment || null,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+// ===== 파트너 히스토리 (S08) =====
+async function getPartnerHistory(filters = {}) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return [];
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_history_entries")
+    .select("id, entry_date, entry_type, content, created_at")
+    .eq("partner_id", partnerId)
+    .order("entry_date", { ascending: false })
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function addPartnerHistoryEntry(filters, payload) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  if (!payload.content) throw new Error("내용을 입력하세요.");
+  if (!payload.entryDate) throw new Error("날짜를 입력하세요.");
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_history_entries")
+    .insert({
+      partner_id: partnerId,
+      entry_date: payload.entryDate,
+      entry_type: payload.entryType || "메모",
+      content: payload.content,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function getPartnerReportDownloads(filters = {}) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return [];
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_report_downloads")
+    .select("id, report_type, tab_name, downloaded_at")
+    .eq("partner_id", partnerId)
+    .order("downloaded_at", { ascending: false })
+    .limit(50);
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+// 회사가 아직 선택 안 된 상태로 다운로드하면 partnerId가 없어 조용히 스킵한다 —
+// 로그 기록 실패로 실제 PDF/PPT 다운로드 자체를 막을 이유는 없다.
+async function logPartnerReportDownload(filters, payload) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) return null;
+
+  const supabase = getSupabase();
+  const { error } = await supabase.from("partner_report_downloads").insert({
+    partner_id: partnerId,
+    report_type: payload.reportType,
+    tab_name: payload.tabName || null,
+  });
+  if (error) throw new Error(error.message);
+  return true;
+}
+
 module.exports = {
   getKpiTrend,
   getSalesTypeTrend,
@@ -884,4 +1061,10 @@ module.exports = {
   getCompanyProducts,
   getDistinctRegions,
   getDistinctDepts,
+  getCampaigns,
+  createCampaign,
+  getPartnerHistory,
+  addPartnerHistoryEntry,
+  getPartnerReportDownloads,
+  logPartnerReportDownload,
 };

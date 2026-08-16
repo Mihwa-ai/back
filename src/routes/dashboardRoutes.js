@@ -9,6 +9,12 @@ const {
   getBuyerSegments,
   getCompanies,
   getCompanyProducts,
+  getCampaigns,
+  createCampaign,
+  getPartnerHistory,
+  addPartnerHistoryEntry,
+  getPartnerReportDownloads,
+  logPartnerReportDownload,
 } = require("../services/dashboardQueries");
 const { getDashboardAiSummary, getAiInsightTab, getBuyerAnalysisAiSummary } = require("../services/aiInsights");
 
@@ -97,6 +103,36 @@ router.get(
 router.get(
   "/buyer-analysis-summary",
   handle((req) => getBuyerAnalysisAiSummary({ ...commonFilters(req), month: req.query.month }))
+);
+
+router.get(
+  "/campaigns",
+  handle((req) => getCampaigns(commonFilters(req)))
+);
+
+router.post(
+  "/campaigns",
+  handle((req) => createCampaign(commonFilters(req), req.body))
+);
+
+router.get(
+  "/partner-history",
+  handle((req) => getPartnerHistory(commonFilters(req)))
+);
+
+router.post(
+  "/partner-history",
+  handle((req) => addPartnerHistoryEntry(commonFilters(req), req.body))
+);
+
+router.get(
+  "/partner-report-downloads",
+  handle((req) => getPartnerReportDownloads(commonFilters(req)))
+);
+
+router.post(
+  "/partner-report-downloads",
+  handle((req) => logPartnerReportDownload(commonFilters(req), req.body))
 );
 
 router.get(
