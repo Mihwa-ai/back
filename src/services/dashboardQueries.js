@@ -917,8 +917,11 @@ async function computeCampaignPerformance(partnerId, campaign) {
     computeCampaignPeriodStats(partnerId, priorRangeStart, priorRangeEnd, targetProductCode),
   ]);
 
+  // targetProductCode가 없으면 Uplift가 파트너 전체 매출 기준이라 캠페인 예산과 비교할
+  // 근거가 없다 (회사 전체 매출은 예산과 무관하게 매달 수천만~수억 단위로 자연 변동한다).
+  // 이 경우 ROI는 계산하지 않고 Uplift(매출 변동액)만 보여준다.
   const upliftRaw = curr.totalSales - prior.totalSales;
-  const roiPct = budget > 0 ? Math.round(((upliftRaw - budget) / budget) * 1000) / 10 : null;
+  const roiPct = budget > 0 && targetProductCode ? Math.round(((upliftRaw - budget) / budget) * 1000) / 10 : null;
   const newBuyerCount = [...curr.buyers].filter((v) => !prior.buyers.has(v)).length;
   const repeatBuyerCount = [...curr.buyers].filter((v) => prior.buyers.has(v)).length;
   const repurchaseRatePct = prior.buyers.size > 0 ? Math.round((repeatBuyerCount / prior.buyers.size) * 1000) / 10 : null;
