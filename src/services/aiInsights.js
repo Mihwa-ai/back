@@ -321,4 +321,94 @@ function getAiInsightTab(filters = {}) {
   });
 }
 
-module.exports = { getDashboardAiSummary, getAiInsightTab };
+// ===== 구매처 분석 탭 (Section C: 이탈 리스크 / 퍼널 병목 / 추천 실행과제) =====
+// 퍼널 병목은 구매 퍼널 로그 데이터(검색→조회→장바구니→결제)가 아직 연동되지 않아
+// 모델에게 판단을 맡기지 않고 항상 hasData=false 고정 문구로 채운다.
+function simpleCardSchema(desc) {
+  return {
+    type: "object",
+    properties: {
+      hasData: { type: "boolean", description: "이 카드에 실제 근거 데이터가 있는지 여부" },
+      body: { type: "string", description: `${desc}. 한 문장, 순수 텍스트만(태그·마크업 금지), 반드시 수치 포함. hasData=false면 지어내지 말고 데이터가 없다는 사실만 짧게.` },
+    },
+    required: ["hasData", "body"],
+  };
+}
+
+const BUYER_ANALYSIS_TOOL = {
+  name: "submit_buyer_analysis_summary",
+  description: "구매처 분석 탭의 AI 요약(이탈 리스크·추천 실행과제)을 제출한다. 마크업이나 태그 없이 순수 텍스트로만 작성한다.",
+  input_schema: {
+    type: "object",
+    properties: {
+      churnRisk: simpleCardSchema("구매처 이탈 리스크 요약 — 이탈위험 세그먼트 수·증감을 근거로 리스크 정도와 권장 조치"),
+      actionRecommendation: simpleCardSchema("구매처 관리 추천 실행과제 — 관심/단발 등 재구매 유도가 필요한 세그먼트나 신규 구매처 현황을 근거로 한 구체적 실행 제안"),
+    },
+    required: ["churnRisk", "actionRecommendation"],
+  },
+};
+
+const FUNNEL_NO_DATA_CARD = { hasData: false, body: "구매 퍼널(검색→조회→장바구니→결제) 로그 데이터가 아직 연동되지 않아 분석할 수 없습니다." };
+
+async function buildBuyerAnalysisContext(filters) {
+  const [buyerSegments, newBuyers] = await Promise.all([getBuyerSegments(filters), getNewBuyers(filters)]);
+
+  return {
+    company: filters.company || "전체",
+    period: filters.month || "이번 달",
+    segments: buyerSegments.segments,
+    newBuyers: { total: newBuyers.total, delta: newBuyers.delta },
+  };
+}
+
+function buildBuyerAnalysisPrompt(ctx) {
+  return `당신은 블루팜코리아 Sales Intelligence Dashboard의 AI 분석가입니다. "${ctx.company}" 기준 ${ctx.period} 구매처 분석 탭에 표시할 AI 요약을 작성합니다.
+아래 수치만 근거로 분석하고, 없는 내용은 절대 추측하거나 지어내지 마세요.
+
+[구매처 세그먼트 — 전월대비 증감]
+${ctx.segments.map((s) => `- ${s.seg}: ${s.count}곳 (${s.deltaCount >= 0 ? "+" : ""}${s.deltaCount})`).join("\n")}
+
+[신규 구매처]
+- ${ctx.newBuyers.total}곳 (전월비 ${ctx.newBuyers.delta >= 0 ? "+" : ""}${ctx.newBuyers.delta})
+
+위 도구(submit_buyer_analysis_summary)를 호출해서 결과를 제출하세요.
+- churnRisk: 이탈위험 세그먼트 수치를 근거로 리스크 정도와 권장 조치를 한 문장으로.
+- actionRecommendation: 관심/단발 세그먼트나 신규 구매처 현황을 근거로 실행 제안을 한 문장으로.`;
+}
+
+async function callClaudeForBuyerAnalysis(ctx) {
+  const anthropic = getClient();
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 1024,
+    tools: [BUYER_ANALYSIS_TOOL],
+    tool_choice: { type: "tool", name: BUYER_ANALYSIS_TOOL.name },
+    messages: [{ role: "user", content: buildBuyerAnalysisPrompt(ctx) }],
+  });
+
+  const toolUse = message.content.find((block) => block.type === "tool_use");
+  if (!toolUse) throw new Error("Claude 응답에서 결과를 찾지 못했습니다.");
+
+  const input = toolUse.input || {};
+  const sanitizeCard = (card) => ({ hasData: Boolean(card && card.hasData), body: sanitizeText(card && card.body) });
+
+  return {
+    churnRisk: sanitizeCard(input.churnRisk),
+    funnelBottleneck: FUNNEL_NO_DATA_CARD,
+    actionRecommendation: sanitizeCard(input.actionRecommendation),
+  };
+}
+
+function buyerAnalysisCacheKeyFor(filters) {
+  const channelsKey = filters.channels && filters.channels.length ? filters.channels.slice().sort().join(",") : "all";
+  return `buyerAnalysisSummary:${filters.company || "all"}:${filters.product || "all"}:${filters.region || "all"}:${filters.dept || "all"}:${channelsKey}:${filters.month || "current"}`;
+}
+
+function getBuyerAnalysisAiSummary(filters = {}) {
+  return getOrSet(buyerAnalysisCacheKeyFor(filters), AI_SUMMARY_TTL, async () => {
+    const ctx = await buildBuyerAnalysisContext(filters);
+    return callClaudeForBuyerAnalysis(ctx);
+  });
+}
+
+module.exports = { getDashboardAiSummary, getAiInsightTab, getBuyerAnalysisAiSummary };
