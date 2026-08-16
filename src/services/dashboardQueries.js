@@ -1123,7 +1123,10 @@ async function addPartnerHistoryAttachment(filters, entryId, file) {
   await verifyHistoryEntryOwnership(partnerId, id);
 
   const supabase = getSupabase();
-  const safeName = file.originalname.replace(/[^\w.\-가-힣 ]/g, "_");
+  // multer/busboy는 multipart 파트의 파일명을 latin1로 디코딩하므로, UTF-8(한글) 파일명이
+  // 여기서 깨져 들어온다. latin1 -> utf8로 재해석해 원래 문자열을 복원한다.
+  const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
+  const safeName = originalName.replace(/[^\w.\-가-힣 ]/g, "_");
   const storagePath = `${partnerId}/${id}/${Date.now()}_${safeName}`;
   const { error: uploadError } = await supabase.storage
     .from("partner-attachments")
@@ -1136,7 +1139,7 @@ async function addPartnerHistoryAttachment(filters, entryId, file) {
     .from("partner_history_attachments")
     .insert({
       entry_id: id,
-      file_name: file.originalname,
+      file_name: originalName,
       storage_path: storagePath,
       file_url: urlData.publicUrl,
     })
