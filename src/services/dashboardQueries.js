@@ -628,21 +628,24 @@ const BUYER_LOOKBACK_MONTHS = 16; // 12개월 표시 + 휴면(3개월 갭) 판�
 const DORMANT_GAP_MONTHS = 3;
 
 // 세그먼트 내 거래처들의 "평균 구매주기"를 히트맵 표시 구간(monthsWindow) 안에서 계산한다.
-// 거래처별로 주문이 있던 달(getOrderCount>0)의 인덱스를 모아 첫 활동월~마지막 활동월
-// 구간을 (활동 개월 수 - 1)로 나눠 평균 간격(개월)을 구하고, 이를 다시 거래처 간
-// 평균한 뒤 30을 곱해 대략적인 일수로 환산한다. 활동월이 1개 이하인 거래처는
-// 주기를 계산할 기준이 없어 제외 — 세그먼트 내 아무도 계산 가능한 거래처가 없으면 null.
+// 거래처별로 주문이 있던 달(getOrderCount>0)의 인덱스를 모아 연속한 활동월 사이의
+// 간격을 구하고, 마지막 활동월부터 구간 끝(현재)까지의 공백도 하나의 간격으로 포함한다 —
+// 이걸 빼면 이탈위험처럼 최근엔 계속 안 사는 세그먼트가 "예전에 반짝 활동했던 사이 간격"만
+// 평균에 잡혀 오히려 짧게 나오는 오류가 생긴다. 활동월이 1개뿐인 거래처도 "그 달부터
+// 지금까지의 공백" 하나로 계산에 포함시킨다. 활동이 전혀 없는 거래처만 제외한다.
 function avgCycleDaysForSegment(vendorsInSeg, monthsWindow, getOrderCount) {
+  const lastIdx = monthsWindow.length - 1;
   const gaps = [];
   for (const venCd of vendorsInSeg) {
     const activeIdx = [];
     monthsWindow.forEach((mk, i) => {
       if ((getOrderCount(venCd, mk) || 0) > 0) activeIdx.push(i);
     });
-    if (activeIdx.length >= 2) {
-      const span = activeIdx[activeIdx.length - 1] - activeIdx[0];
-      gaps.push(span / (activeIdx.length - 1));
-    }
+    if (!activeIdx.length) continue;
+    const intervals = [];
+    for (let k = 1; k < activeIdx.length; k++) intervals.push(activeIdx[k] - activeIdx[k - 1]);
+    intervals.push(lastIdx - activeIdx[activeIdx.length - 1]); // 마지막 구매 이후 현재까지의 공백
+    gaps.push(intervals.reduce((a, b) => a + b, 0) / intervals.length);
   }
   if (!gaps.length) return null;
   const avgMonths = gaps.reduce((a, b) => a + b, 0) / gaps.length;
