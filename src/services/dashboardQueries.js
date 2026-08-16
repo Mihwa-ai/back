@@ -515,7 +515,7 @@ async function getBuyerSegmentsFromMart(filters, endMonth) {
   const partnerId = await getPartnerIdByGroupNm(filters.company);
   if (partnerId == null) {
     const emptySegments = SEGMENT_ORDER.map((seg) => ({ seg, count: 0, pct: 0, deltaCount: 0 }));
-    return { segments: emptySegments, heatmap12: { months: months12, rows: SEGMENT_ORDER.map((seg) => ({ seg, values: months12.map(() => 0) })) } };
+    return { segments: emptySegments, heatmap12: { months: months12, rows: SEGMENT_ORDER.map((seg) => ({ seg, values: months12.map(() => 0), avgCycleDays: null })) } };
   }
 
   const startYm = `${months12[0]}-01`;
@@ -569,7 +569,8 @@ async function getBuyerSegmentsFromMart(filters, endMonth) {
       }
       return Math.max(0, Math.min(5, Math.round(sum / vendorsInSeg.length)));
     });
-    return { seg, values };
+    const avgCycleDays = avgCycleDaysForSegment(vendorsInSeg, months12, (venCd, mk) => byVendorMonthOrders.get(venCd)?.get(mk));
+    return { seg, values, avgCycleDays };
   });
 
   return { segments, heatmap12: { months: months12, rows: heatmapRows } };
@@ -625,6 +626,28 @@ const SEGMENT_ORDER = ["충성", "일반", "단발", "관심", "이탈위험"];
 const BUYER_TREND_MONTHS = 12;
 const BUYER_LOOKBACK_MONTHS = 16; // 12개월 표시 + 휴면(3개월 갭) 판정용 여유
 const DORMANT_GAP_MONTHS = 3;
+
+// 세그먼트 내 거래처들의 "평균 구매주기"를 히트맵 표시 구간(monthsWindow) 안에서 계산한다.
+// 거래처별로 주문이 있던 달(getOrderCount>0)의 인덱스를 모아 첫 활동월~마지막 활동월
+// 구간을 (활동 개월 수 - 1)로 나눠 평균 간격(개월)을 구하고, 이를 다시 거래처 간
+// 평균한 뒤 30을 곱해 대략적인 일수로 환산한다. 활동월이 1개 이하인 거래처는
+// 주기를 계산할 기준이 없어 제외 — 세그먼트 내 아무도 계산 가능한 거래처가 없으면 null.
+function avgCycleDaysForSegment(vendorsInSeg, monthsWindow, getOrderCount) {
+  const gaps = [];
+  for (const venCd of vendorsInSeg) {
+    const activeIdx = [];
+    monthsWindow.forEach((mk, i) => {
+      if ((getOrderCount(venCd, mk) || 0) > 0) activeIdx.push(i);
+    });
+    if (activeIdx.length >= 2) {
+      const span = activeIdx[activeIdx.length - 1] - activeIdx[0];
+      gaps.push(span / (activeIdx.length - 1));
+    }
+  }
+  if (!gaps.length) return null;
+  const avgMonths = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  return Math.round(avgMonths * 30);
+}
 
 function fetchBuyerMonthlyMatrix(rangeStart, rangeEnd, { productCdSet, region, dept, saleTypes }) {
   const key = `buyerMatrix:${rangeStart}:${rangeEnd}:${productCdSet ? [...productCdSet].sort().join(",") : "all"}:${
@@ -810,7 +833,8 @@ async function getBuyerSegments(filters = {}) {
       }
       return Math.max(0, Math.min(5, Math.round(sum / vendorsInSeg.length)));
     });
-    return { seg, values };
+    const avgCycleDays = avgCycleDaysForSegment(vendorsInSeg, months12, (venCd, mk) => byVendor.get(venCd)?.get(mk)?.orderCount);
+    return { seg, values, avgCycleDays };
   });
 
   return { segments, heatmap12: { months: months12, rows } };
