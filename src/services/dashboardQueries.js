@@ -94,10 +94,6 @@ function getVendorLookup() {
   });
 }
 
-function productGroupKey(p) {
-  return p.physic_std && p.physic_std.trim() ? p.physic_std : `cd:${p.physic_cd}`;
-}
-
 function getProductCatalog() {
   return getOrSet("productCatalog", CATALOG_TTL, async () => {
     const [products, partners] = await Promise.all([
@@ -114,7 +110,7 @@ async function resolveProductCdSet({ company, product } = {}) {
   const catalog = await getProductCatalog();
   let list = catalog;
   if (company) list = list.filter((p) => p.group_nm === company);
-  if (product) list = list.filter((p) => productGroupKey(p) === product);
+  if (product) list = list.filter((p) => p.physic_cd === product);
   return new Set(list.map((p) => p.physic_cd));
 }
 
@@ -829,15 +825,10 @@ async function getCompanies() {
 
 async function getCompanyProducts(groupNm) {
   const catalog = await getProductCatalog();
-  const filtered = catalog.filter((p) => p.group_nm === groupNm);
-
-  const byKey = new Map();
-  for (const p of filtered) {
-    const key = productGroupKey(p);
-    if (!byKey.has(key)) byKey.set(key, { code: key, name: p.physic_nm });
-  }
-
-  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  return catalog
+    .filter((p) => p.group_nm === groupNm)
+    .map((p) => ({ code: p.physic_cd, name: p.physic_nm }))
+    .sort((a, b) => a.name.localeCompare(b.name, "ko"));
 }
 
 async function getDistinctRegions() {
