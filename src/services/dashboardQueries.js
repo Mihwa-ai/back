@@ -1189,6 +1189,28 @@ async function getPartnerReportDownloads(filters = {}) {
   return data;
 }
 
+async function deletePartnerReportDownload(filters, downloadId) {
+  const partnerId = await getPartnerIdByGroupNm(filters.company);
+  if (partnerId == null) throw new Error("회사를 먼저 선택하세요.");
+  const id = Number(downloadId);
+  if (!Number.isInteger(id)) throw new Error("잘못된 다운로드 이력 id입니다.");
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("partner_report_downloads")
+    .delete()
+    .eq("id", id)
+    .eq("partner_id", partnerId)
+    .select("storage_path")
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("해당 다운로드 이력을 찾을 수 없습니다.");
+  if (data.storage_path) {
+    await supabase.storage.from("report-downloads").remove([data.storage_path]);
+  }
+  return { ok: true };
+}
+
 // 회사가 아직 선택 안 된 상태로 다운로드하면 partnerId가 없어 조용히 스킵한다 —
 // 로그 기록 실패로 실제 PDF/PPT 다운로드 자체를 막을 이유는 없다.
 // 프론트에서 실제로 생성한 PDF/PPT 파일 바이트를 그대로 받아 스토리지에 저장해두면,
@@ -1254,5 +1276,6 @@ module.exports = {
   addPartnerHistoryAttachment,
   deletePartnerHistoryAttachment,
   getPartnerReportDownloads,
+  deletePartnerReportDownload,
   logPartnerReportDownloadFile,
 };

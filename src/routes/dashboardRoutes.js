@@ -20,6 +20,7 @@ const {
   addPartnerHistoryAttachment,
   deletePartnerHistoryAttachment,
   getPartnerReportDownloads,
+  deletePartnerReportDownload,
   logPartnerReportDownloadFile,
 } = require("../services/dashboardQueries");
 const { getDashboardAiSummary, getAiInsightTab, getBuyerAnalysisAiSummary } = require("../services/aiInsights");
@@ -173,6 +174,11 @@ router.post(
   "/partner-report-downloads/file",
   upload.single("file"),
   handle((req) => logPartnerReportDownloadFile(commonFilters(req), req.body, req.file))
+);
+
+router.delete(
+  "/partner-report-downloads/:id",
+  handle((req) => deletePartnerReportDownload(commonFilters(req), req.params.id))
 );
 
 router.get(
