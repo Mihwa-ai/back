@@ -893,7 +893,7 @@ async function computeCampaignPeriodStats(partnerId, rangeStart, rangeEnd, produ
     p_partner_id: partnerId,
     range_start: rangeStart,
     range_end: rangeEnd,
-    product_cd: productCd || null,
+    p_product_cd: productCd || null,
   });
   if (error) throw new Error(error.message);
   const buyers = new Set(data.map((r) => r.ven_cd));
