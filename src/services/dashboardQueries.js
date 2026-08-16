@@ -935,6 +935,8 @@ async function computeCampaignPerformance(partnerId, campaign) {
     priorBuyerCount: prior.buyers.size,
     newBuyerCount,
     repurchaseRatePct,
+    comparePeriodStart: priorRangeStart,
+    comparePeriodEnd: addDays(priorRangeEnd, -1),
   };
 }
 
