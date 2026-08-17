@@ -275,7 +275,7 @@ ${ctx.segments.map((s) => `- ${s.seg}: ${s.count}곳 (${s.deltaCount >= 0 ? "+" 
 actionItems는 위에 제공된 판매 지표·지역/진료과·세그먼트·채널 수치를 근거로 최소 3개를 반드시 작성하세요 — 빈 배열([])을 제출하는 것은 허용되지 않습니다. product/competitor 카드처럼 데이터가 없는 항목은 hasData=false로 처리하되, actionItems 자체는 항상 채워야 합니다.`;
 }
 
-async function callClaudeForInsightTab(ctx) {
+async function requestInsightTab(ctx) {
   const anthropic = getClient();
   const message = await anthropic.messages.create({
     model: MODEL,
@@ -308,6 +308,19 @@ async function callClaudeForInsightTab(ctx) {
     .filter((item) => item.text);
 
   return { executiveSummary, cards, actionItems };
+}
+
+// tool_choice로 강제해도 minItems 같은 스키마 제약은 100% 보장되지 않아, 모델이 가끔
+// actionItems를 빈 배열로 반환한다 — 근거 데이터가 실제로 있는데도 비어 있으면 한 번 더 시도한다.
+async function callClaudeForInsightTab(ctx) {
+  const result = await requestInsightTab(ctx);
+  if (result.actionItems.length > 0) return result;
+
+  const hasAnyRealData = Object.values(result.cards).some((c) => c.hasData);
+  if (!hasAnyRealData) return result;
+
+  const retry = await requestInsightTab(ctx);
+  return retry.actionItems.length > 0 ? retry : result;
 }
 
 function insightTabCacheKeyFor(filters) {
