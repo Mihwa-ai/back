@@ -1213,22 +1213,27 @@ async function deletePartnerReportDownload(filters, downloadId) {
 
 // 회사가 아직 선택 안 된 상태로 다운로드하면 partnerId가 없어 조용히 스킵한다 —
 // 로그 기록 실패로 실제 PDF/PPT 다운로드 자체를 막을 이유는 없다.
-// 프론트에서 실제로 생성한 PDF/PPT 파일 바이트를 그대로 받아 스토리지에 저장해두면,
-// 이력 화면에서 "다시 다운로드"로 그때 그 파일을 그대로 다시 받을 수 있다.
+// PPT는 프론트에서 실제로 생성한 파일 바이트를 그대로 받아 스토리지에 저장해두면
+// 이력 화면에서 "다시 다운로드"로 그때 그 파일을 그대로 다시 받을 수 있다. PDF는
+// 브라우저 기본 인쇄(window.print())로 만들어서 파일 바이트에 접근할 수 없으므로
+// file 없이 호출되며, 이 경우 조회 필터 등 메타데이터만 기록한다.
 async function logPartnerReportDownloadFile(filters, payload, file) {
   const partnerId = await getPartnerIdByGroupNm(filters.company);
   if (partnerId == null) return null;
-  if (!file) throw new Error("업로드할 파일이 없습니다.");
 
   const supabase = getSupabase();
-  const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
-  const safeName = originalName.replace(/[^\w.-]/g, "_");
-  const storagePath = `${partnerId}/${Date.now()}_${safeName}`;
-  const { error: uploadError } = await supabase.storage
-    .from("report-downloads")
-    .upload(storagePath, file.buffer, { contentType: file.mimetype });
-  if (uploadError) throw new Error(uploadError.message);
-  const { data: urlData } = supabase.storage.from("report-downloads").getPublicUrl(storagePath);
+  let fileFields = { file_name: null, storage_path: null, file_url: null };
+  if (file) {
+    const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
+    const safeName = originalName.replace(/[^\w.-]/g, "_");
+    const storagePath = `${partnerId}/${Date.now()}_${safeName}`;
+    const { error: uploadError } = await supabase.storage
+      .from("report-downloads")
+      .upload(storagePath, file.buffer, { contentType: file.mimetype });
+    if (uploadError) throw new Error(uploadError.message);
+    const { data: urlData } = supabase.storage.from("report-downloads").getPublicUrl(storagePath);
+    fileFields = { file_name: originalName, storage_path: storagePath, file_url: urlData.publicUrl };
+  }
 
   let filtersSnapshot = null;
   if (payload.filtersSnapshot) {
@@ -1243,9 +1248,7 @@ async function logPartnerReportDownloadFile(filters, payload, file) {
     partner_id: partnerId,
     report_type: payload.reportType,
     tab_name: payload.tabName || null,
-    file_name: originalName,
-    storage_path: storagePath,
-    file_url: urlData.publicUrl,
+    ...fileFields,
     company_name: payload.companyName || null,
     period_label: payload.periodLabel || null,
     filters_snapshot: filtersSnapshot,
