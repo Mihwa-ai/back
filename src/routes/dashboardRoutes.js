@@ -19,7 +19,6 @@ const {
   deletePartnerHistoryEntry,
   addPartnerHistoryAttachment,
   deletePartnerHistoryAttachment,
-  debugProductCdSet,
   getPartnerReportDownloads,
   deletePartnerReportDownload,
   logPartnerReportDownloadFile,
@@ -180,11 +179,6 @@ router.post(
 router.delete(
   "/partner-report-downloads/:id",
   handle((req) => deletePartnerReportDownload(commonFilters(req), req.params.id))
-);
-
-router.get(
-  "/debug/product-cds",
-  handle((req) => debugProductCdSet(commonFilters(req)))
 );
 
 router.get(

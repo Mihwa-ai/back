@@ -114,25 +114,6 @@ async function resolveProductCdSet({ company, product } = {}) {
   return new Set(list.map((p) => p.physic_cd));
 }
 
-// TEMP DEBUG — remove after diagnosing the empty-company-filter bug.
-async function debugProductCdSet(filters) {
-  const catalog = await getProductCatalog();
-  const byCompany = filters.company ? catalog.filter((p) => p.group_nm === filters.company) : null;
-  const set = await resolveProductCdSet(filters);
-  return {
-    catalogLength: catalog.length,
-    companyValue: filters.company,
-    companyValueLength: filters.company ? filters.company.length : null,
-    companyValueCodePoints: filters.company ? [...filters.company].map((c) => c.codePointAt(0)) : null,
-    sampleGroupNm: catalog.slice(0, 3).map((p) => p.group_nm),
-    sampleGroupNmCodePoints: catalog[2] ? [...(catalog[2].group_nm || "")].map((c) => c.codePointAt(0)) : null,
-    byCompanyLength: byCompany ? byCompany.length : null,
-    byCompanySample: byCompany ? byCompany.slice(0, 5).map((p) => p.physic_cd) : null,
-    resolvedSetSize: set ? set.size : null,
-    resolvedSetSample: set ? [...set].slice(0, 5) : null,
-  };
-}
-
 function fetchSalesRangeCached(rangeStart, rangeEnd, productCdSet) {
   const productCdsKey = productCdSet ? [...productCdSet].sort().join(",") : "all";
   return getOrSet(`sales:${rangeStart}:${rangeEnd}:${productCdsKey}`, SALES_TTL, async () => {
@@ -1297,7 +1278,6 @@ module.exports = {
   deletePartnerHistoryEntry,
   addPartnerHistoryAttachment,
   deletePartnerHistoryAttachment,
-  debugProductCdSet,
   getPartnerReportDownloads,
   deletePartnerReportDownload,
   logPartnerReportDownloadFile,

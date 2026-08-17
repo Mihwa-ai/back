@@ -81,7 +81,7 @@ const INSIGHT_TAB_TOOL = {
         },
         minItems: 3,
         maxItems: 5,
-        description: "우선순위 추천 실행과제 3~5개",
+        description: "우선순위 추천 실행과제 3~5개. 판매 지표·세그먼트·채널 데이터 중 하나라도 제공되었다면 절대 빈 배열을 반환하지 말 것 — 그 데이터를 근거로 최소 3개를 반드시 작성한다. product/competitor처럼 근거가 전혀 없는 항목만 비워도 되는 예외이고, actionItems 자체를 비우는 것은 허용되지 않는다.",
       },
     },
     required: ["executiveSummary", "cards", "actionItems"],
@@ -271,7 +271,8 @@ ${ctx.segments.map((s) => `- ${s.seg}: ${s.count}곳 (${s.deltaCount >= 0 ? "+" 
 - 제품별(개별 품목) 매출/전환율 데이터는 제공되지 않습니다.
 - 경쟁사 시장점유율(IQVIA 등) 데이터는 제공되지 않습니다.
 
-위 도구(submit_ai_insight_tab)를 호출해서 결과를 제출하세요.`;
+위 도구(submit_ai_insight_tab)를 호출해서 결과를 제출하세요.
+actionItems는 위에 제공된 판매 지표·지역/진료과·세그먼트·채널 수치를 근거로 최소 3개를 반드시 작성하세요 — 빈 배열([])을 제출하는 것은 허용되지 않습니다. product/competitor 카드처럼 데이터가 없는 항목은 hasData=false로 처리하되, actionItems 자체는 항상 채워야 합니다.`;
 }
 
 async function callClaudeForInsightTab(ctx) {
